@@ -1,1 +1,0 @@
-This folder contains source code for the Arduino and is not a part of the driver

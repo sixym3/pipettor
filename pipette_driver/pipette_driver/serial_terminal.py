@@ -1,6 +1,3 @@
-# This script is used to test the serial communication between the Universal Robot and the Arduino.
-# Requires socat command from README.md to be run first.
-
 #!/usr/bin/env python3
 import serial
 import time
@@ -8,8 +5,8 @@ import sys
 import threading
 
 # Configuration
-SERIAL_PORT = '/tmp/ttyUR'  # Virtual serial port created by socat
-BAUD_RATE = 115200         # Standard baud rate for RS485
+SERIAL_PORT = '/tmp/ttyUR'  # Default serial port
+BAUD_RATE = 115200         # Standard baud rate
 TIMEOUT = 1                # Serial timeout in seconds
 
 def read_responses(ser):
@@ -46,7 +43,7 @@ def send_command(ser, command):
         return False
 
 def main():
-    print("RS485 Interactive Sender via Universal Robot")
+    print("Arduino Serial Communication Terminal")
     print(f"Connecting to {SERIAL_PORT} at {BAUD_RATE} baud...")
     
     try:

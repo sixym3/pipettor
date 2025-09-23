@@ -1,0 +1,17 @@
+# VSCode
+.vscode
+CLAUDE.md
+
+# ROS
+build
+install
+log
+
+# QtCreator
+*.user
+
+# PyCharm
+venv
+.idea
+*.egg-info
+__pycache__

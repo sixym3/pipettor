@@ -1,6 +1,6 @@
 # Pipette Driver
 
-ROS2 package providing hardware interface and control for a pipette tool with 2 actuators (plunger and tip ejection) and LED strip control.
+ROS2 package providing hardware interface and control for a pipette tool with 2 actuators (plunger and tip ejection).
 
 ## Overview
 
@@ -8,7 +8,6 @@ This package provides ROS2 control for a pipette via Arduino serial communicatio
 
 ### Features
 - **Actuator Control**: Plunger depression and tip ejection mechanisms via FollowJointTrajectory action
-- **LED Control**: RGB LED strip control via SetBool service and ColorRGBA topic  
 - **Serial Communication**: RS485/Serial communication with Arduino using combined SETPOSITION commands
 - **Standard Interfaces**: Uses control_msgs and std_msgs - no custom interfaces needed
 - **GUI Integration**: Joint state bridge for RViz slider control
@@ -18,19 +17,14 @@ This package provides ROS2 control for a pipette via Arduino serial communicatio
 
 ### Arduino Setup
 - **Arduino board** with RS485 communication capability
-- **Stepper motors** for plunger and tip ejection (pins configurable)
-- **LED strip** (NeoPixel/WS2812 compatible - 24 pixels)
+- **Linear actuators** for plunger and tip ejection (PWM controlled)
 - **Serial connection** to ROS2 computer
 
 ### Wiring (Default Pins - Configurable in Arduino Code)
 ```
 Actuators:
-- Plunger: Step=2, Dir=3, Enable=4
-- Tip Eject: Step=5, Dir=6, Enable=7
-
-LED Strip:
-- Data Pin: 12 (24 pixels)
-- Power: 5V/GND
+- Plunger PWM: Pin 9
+- Tip Eject PWM: Pin 10
 
 Communication:
 - RS485: Pins 0(RX), 1(TX) at 115200 baud
@@ -49,9 +43,8 @@ source install/setup.bash
 ```
 
 ### 2. Arduino Firmware
-Choose and upload one of the Arduino sketches:
-- **Production**: `pipette_driver/arduino_server/pipette_actuator_control.ino` - For real hardware
-- **LED Test**: `pipette_driver/arduino_server/pipette_actuator_control_led_test.ino` - LED scales with joint positions
+Upload the Arduino sketch:
+- **Production**: `arduino_server/pipette_actuator_control.ino` - For real hardware
 
 ## Usage
 
@@ -69,49 +62,19 @@ ros2 run pipette_driver pipette_driver_node --ros-args -p serial_port:=/dev/ttyU
 
 #### 1. Joint Trajectory Action (Pipette Movement)
 - **Action**: `/follow_joint_trajectory` (control_msgs/action/FollowJointTrajectory)
-- **Joints**: `plunger_joint` (0-10mm), `tip_eject_joint` (0-5mm)
+- **Joints**: `plunger_joint`, `tip_eject_joint` (percentage-based positions)
 
 ```bash
-# Move pipette to specific positions
+# Move pipette to specific positions (55% plunger, 30% tip eject)
 ros2 action send_goal /follow_joint_trajectory control_msgs/action/FollowJointTrajectory "{
   trajectory: {
     joint_names: ['plunger_joint', 'tip_eject_joint'],
     points: [{
-      positions: [0.005, 0.002],
+      positions: [0.55, 0.30],
       time_from_start: {sec: 2}
     }]
   }
 }"
-```
-
-#### 2. LED On/Off Service
-- **Service**: `/set_led` (std_srvs/srv/SetBool)
-- **Behavior**: True = white (255,255,255), False = off (0,0,0)
-
-```bash
-# Turn LED on (white)
-ros2 service call /set_led std_srvs/srv/SetBool "{data: true}"
-
-# Turn LED off
-ros2 service call /set_led std_srvs/srv/SetBool "{data: false}"
-```
-
-#### 3. LED Color Control Topic
-- **Topic**: `/set_color` (std_msgs/msg/ColorRGBA)
-- **Values**: r,g,b as floats 0.0-1.0 (converted to 0-255 internally)
-
-```bash
-# Set red color
-ros2 topic pub /set_color std_msgs/msg/ColorRGBA "{r: 1.0, g: 0.0, b: 0.0, a: 1.0}" --once
-
-# Set green color
-ros2 topic pub /set_color std_msgs/msg/ColorRGBA "{r: 0.0, g: 1.0, b: 0.0, a: 1.0}" --once
-
-# Set blue color  
-ros2 topic pub /set_color std_msgs/msg/ColorRGBA "{r: 0.0, g: 0.0, b: 1.0, a: 1.0}" --once
-
-# Set purple color
-ros2 topic pub /set_color std_msgs/msg/ColorRGBA "{r: 1.0, g: 0.0, b: 1.0, a: 1.0}" --once
 ```
 
 ## Testing
@@ -127,25 +90,19 @@ ros2 run pipette_driver serial_terminal
 - Connection established message
 - Heartbeat messages every 5 seconds
 - Commands respond with acknowledgment
-- Test commands: `SETCOLOR 255 0 0`, `SETPOSITION 5 2`, `SETPLUNGER 5`, `SETTIPEJECT 2`, `STATUS`
+- Test commands: `P055`, `T030`, `S055030`, `STATUS`, `HELP`
 
 ### Test 2: ROS2 Node
 ```bash
 # Terminal 1: Start the node
 ros2 run pipette_driver pipette_driver_node
 
-# Terminal 2: Test LED
-ros2 service call /set_led std_srvs/srv/SetBool "{data: true}"
-
-# Terminal 3: Test color
-ros2 topic pub /set_color std_msgs/msg/ColorRGBA "{r: 1.0, g: 0.0, b: 0.0, a: 1.0}" --once
-
-# Terminal 4: Test movement
+# Terminal 2: Test movement
 ros2 action send_goal /follow_joint_trajectory control_msgs/action/FollowJointTrajectory "{
   trajectory: {
     joint_names: ['plunger_joint', 'tip_eject_joint'],
     points: [{
-      positions: [0.005, 0.002],
+      positions: [0.55, 0.30],
       time_from_start: {sec: 2}
     }]
   }
@@ -165,24 +122,22 @@ ros2 topic list
 
 # Check specific interfaces
 ros2 action info /follow_joint_trajectory
-ros2 service info /set_led
-ros2 topic info /set_color
 ```
 
 ## Arduino Commands Reference
 
-### LED Commands
-- `SETCOLOR r g b` - Set RGB color (0-255 each)
-
-### Actuator Commands
-- `SETPOSITION x y` - Set both actuator positions (plunger: 0-10mm, tip: 0-5mm) - **Recommended for coordinated movement**
-- `SETPLUNGER x` - Set plunger position only (0-10mm)
-- `SETTIPEJECT x` - Set tip eject position only (0-5mm)
-- `STATUS` - Get current positions: "PLUNGER:X,TIP:Y,LED=ON/OFF"
+### Primary Commands (New Protocol)
+- `PXXX` - Set plunger percentage (P000-P100, e.g., P055 for 55%)
+- `TXXX` - Set tip eject percentage (T000-T100, e.g., T030 for 30%)
+- `SPPPTTT` - Set both positions (e.g., S055030 for plunger 55%, tip 30%)
 
 ### System Commands
-- `INIT` - Initialize system
-- `V` or `v` - Toggle built-in LED
+- `STATUS` - Get current positions
+- `INIT` - Initialize actuators to 0%
+- `RETRACT` - Move both to 0% (same as S000000)
+- `EXTEND` - Move both to 100% (same as S100100)
+- `V` - Toggle built-in LED
+- `HELP` - Show all available commands
 
 ## Configuration
 
@@ -201,16 +156,13 @@ ros2 run pipette_driver pipette_driver_node --ros-args -p timeout:=2.0
 ### Arduino Pin Configuration
 Modify pin definitions in `pipette_actuator_control.ino`:
 ```cpp
-#define PLUNGER_STEP_PIN 2
-#define PLUNGER_DIR_PIN 3
-#define LED_PIN 12
-#define NUM_PIXELS 24
+#define PLUNGER_PWM_PIN 9
+#define TIP_EJECT_PWM_PIN 10
 ```
 
-### Joint Limits
-The node enforces these limits:
-- Plunger: 0.0 to 0.010 meters (0-10mm)
-- Tip Eject: 0.0 to 0.005 meters (0-5mm)
+### Position Ranges
+- Plunger: 0.0 to 1.0 (0% to 100%)
+- Tip Eject: 0.0 to 1.0 (0% to 100%)
 
 ## Troubleshooting
 
@@ -234,9 +186,7 @@ ros2 pkg executables pipette_driver
 # Check node is running
 ros2 node list
 
-# Check topics/services are advertised
-ros2 topic list | grep set_color
-ros2 service list | grep set_led
+# Check actions are advertised
 ros2 action list | grep follow_joint_trajectory
 ```
 
@@ -275,9 +225,8 @@ ros2 run pipette_driver serial_terminal
 - `joint_state_bridge.py` - Bridge between joint_states topic and trajectory actions
 - `serial_terminal.py` - Interactive serial communication testing tool
 
-### Arduino Firmware  
+### Arduino Firmware
 - `arduino_server/pipette_actuator_control.ino` - Production firmware with SETPOSITION command
-- `arduino_server/pipette_actuator_control_led_test.ino` - Test firmware with position-based LED scaling
 
 ### Configuration
 - `package.xml` - ROS2 package dependencies
@@ -294,12 +243,10 @@ This package is designed to integrate with Universal Robot arms. See the compani
 
 ### Standard Interfaces Used
 - `control_msgs/action/FollowJointTrajectory` - Industry standard for robot control
-- `std_srvs/srv/SetBool` - Simple on/off control
-- `std_msgs/msg/ColorRGBA` - Standard color representation
 
 ### Serial Protocol
 The communication protocol is line-based with `\n` terminators. Commands are echoed back with status messages.
 
-Response format: `"Command acknowledgment"` or `"PLUNGER:X,TIP:Y,LED=STATE"`
+Response format: `"Command acknowledgment"` or position status messages.
 
-**Important**: The ROS2 node uses `SETPOSITION` for coordinated movements to avoid RS485 timing issues when sending separate commands rapidly.
+**Important**: The ROS2 node uses the `SPPPTTT` format for coordinated movements to avoid RS485 timing issues when sending separate commands rapidly.

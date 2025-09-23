@@ -27,7 +27,6 @@ Adafruit_NeoPixel pixels(NUM_PIXELS, LED_PIN, NEO_GRB + NEO_KHZ800);
 #define STARTUP_FLASH_DELAY 50
 #define HEARTBEAT_INTERVAL 5000
 #define HEARTBEAT_DURATION 50
-#define ACTUATOR_SETTLE_TIME 100  // Time to wait after position change
 
 // Global variables
 unsigned long lastHeartbeat = 0;
@@ -84,8 +83,8 @@ void setup() {
   // Send startup messages
   sendMessage("Pipette Linear Actuator Control Ready");
   sendMessage("Position range: 0.0 (retracted) to 1.0 (extended)");
-  sendMessage("Commands: SETPOSITION <plunger> <tip>, SETPLUNGER <pos>, SETTIPEJECT <pos>, SETCOLOR <r> <g> <b>");
-  sendMessage("Position examples: 0.0, 0.25, 0.5, 0.75, 1.0");
+  sendMessage("Commands: PXXX (plunger %), TXXX (tip %), SPPPTTT (both %), STATUS, INIT, HELP");
+  sendMessage("Examples: P055 (55%), T030 (30%), S055030 (plunger 55%, tip 30%)");
   sendMessage("Heartbeat interval: " + String(HEARTBEAT_INTERVAL / 1000) + " seconds");
   
   startTime = millis();
@@ -122,151 +121,114 @@ void loop() {
 
 void processCommand(String command) {
   command.trim();
-  sendMessage("Received: " + command);
+  command.toUpperCase();  // Make commands case-insensitive
 
-  // Actuator Commands
-  if (command.startsWith("SETPOSITION")) {
-    String params = command.substring(12);  // "SETPOSITION " = 12 chars
-    params.trim();  // Remove whitespace
-    
-    int spaceIndex = params.indexOf(' ');
-    if (spaceIndex > 0 && spaceIndex < params.length() - 1) {
-      String plungerStr = params.substring(0, spaceIndex);
-      String tipStr = params.substring(spaceIndex + 1);
-      plungerStr.trim();
-      tipStr.trim();
-      
-      if (plungerStr.length() > 0 && tipStr.length() > 0) {
-        float plunger_pos = plungerStr.toFloat();
-        float tip_pos = tipStr.toFloat();
-        
-        if (plunger_pos >= PLUNGER_MIN_POS && plunger_pos <= PLUNGER_MAX_POS && 
-            tip_pos >= TIP_EJECT_MIN_POS && tip_pos <= TIP_EJECT_MAX_POS) {
-          // Move both actuators
-          setPlungerPosition(plunger_pos);
-          setTipEjectPosition(tip_pos);
-          sendMessage("Position set - Plunger: " + String(plunger_pos, 3) + ", Tip: " + String(tip_pos, 3));
-        } else {
-          sendMessage("Invalid SETPOSITION values: Plunger=" + String(plunger_pos, 3) + ", Tip=" + String(tip_pos, 3));
-          sendMessage("Range: 0.0-1.0 for both");
-        }
-      } else {
-        sendMessage("Invalid SETPOSITION format. Usage: SETPOSITION <plunger_0.0-1.0> <tip_0.0-1.0>");
-        sendMessage("Example: SETPOSITION 0.5 0.25");
-      }
+  // Parse command and sequence number
+  String baseCommand = command;
+  String sequenceNum = "";
+
+  // Check for sequence number format: COMMAND_XXX
+  int underscoreIndex = command.lastIndexOf('_');
+  if (underscoreIndex > 0 && underscoreIndex < command.length() - 1) {
+    baseCommand = command.substring(0, underscoreIndex);
+    sequenceNum = command.substring(underscoreIndex + 1);
+  }
+
+  // Send immediate acknowledgment for position commands
+  if (baseCommand.startsWith("P") || baseCommand.startsWith("T") || baseCommand.startsWith("S")) {
+    sendMessage("ACK " + command);  // Echo full command with sequence
+  } else {
+    sendMessage("Received: " + command);
+  }
+
+  // New compact protocol commands - use baseCommand for parsing, full command for DONE
+  if (baseCommand.startsWith("P") && baseCommand.length() == 4) {
+    // PXXX format - plunger percentage (P000-P100)
+    String percentStr = baseCommand.substring(1);
+    int percent = percentStr.toInt();
+
+    if (percent >= 0 && percent <= 100) {
+      float position = percent / 100.0;
+      setPlungerPosition(position);
+      sendMessage("Plunger set to " + String(percent) + "% (" + String(position, 3) + ")");
+      delay(500);  // Basic movement time estimate
+      sendMessage("DONE " + command);  // Echo full command with sequence
     } else {
-      sendMessage("Invalid SETPOSITION. Usage: SETPOSITION <plunger_0.0-1.0> <tip_0.0-1.0>");
-      sendMessage("Example: SETPOSITION 0.5 0.25");
+      sendMessage("Invalid plunger percentage: " + String(percent) + ". Range: P000-P100");
     }
   }
-  else if (command.startsWith("SETPLUNGER")) {
-    String posStr = command.substring(11);  // "SETPLUNGER " = 11 chars
-    posStr.trim();  // Remove whitespace
-    
-    if (posStr.length() > 0) {
-      float position = posStr.toFloat();
-      if (position >= PLUNGER_MIN_POS && position <= PLUNGER_MAX_POS) {
-        setPlungerPosition(position);
-        sendMessage("Plunger set to " + String(position, 3));
-      } else {
-        sendMessage("Invalid SETPLUNGER position: " + String(position, 3) + ". Range: 0.0-1.0");
-      }
+  else if (baseCommand.startsWith("T") && baseCommand.length() == 4) {
+    // TXXX format - tip eject percentage (T000-T100)
+    String percentStr = baseCommand.substring(1);
+    int percent = percentStr.toInt();
+
+    if (percent >= 0 && percent <= 100) {
+      float position = percent / 100.0;
+      setTipEjectPosition(position);
+      sendMessage("Tip eject set to " + String(percent) + "% (" + String(position, 3) + ")");
+      delay(500);  // Basic movement time estimate
+      sendMessage("DONE " + command);  // Echo full command with sequence
     } else {
-      sendMessage("Invalid SETPLUNGER. Usage: SETPLUNGER <0.0-1.0>");
-      sendMessage("Example: SETPLUNGER 0.75");
+      sendMessage("Invalid tip percentage: " + String(percent) + ". Range: T000-T100");
     }
   }
-  else if (command.startsWith("SETTIPEJECT")) {
-    String posStr = command.substring(12);  // "SETTIPEJECT " = 12 chars
-    posStr.trim();  // Remove whitespace
-    
-    if (posStr.length() > 0) {
-      float position = posStr.toFloat();
-      if (position >= TIP_EJECT_MIN_POS && position <= TIP_EJECT_MAX_POS) {
-        setTipEjectPosition(position);
-        sendMessage("Tip eject set to " + String(position, 3));
-      } else {
-        sendMessage("Invalid SETTIPEJECT position: " + String(position, 3) + ". Range: 0.0-1.0");
-      }
+  else if (baseCommand.startsWith("S") && baseCommand.length() == 7) {
+    // SPPPTTT format - combined command (S055030)
+    String plungerStr = baseCommand.substring(1, 4);
+    String tipStr = baseCommand.substring(4, 7);
+    int plungerPercent = plungerStr.toInt();
+    int tipPercent = tipStr.toInt();
+
+    if (plungerPercent >= 0 && plungerPercent <= 100 && tipPercent >= 0 && tipPercent <= 100) {
+      float plungerPos = plungerPercent / 100.0;
+      float tipPos = tipPercent / 100.0;
+
+      setPlungerPosition(plungerPos);
+      setTipEjectPosition(tipPos);
+      sendMessage("Both set - Plunger: " + String(plungerPercent) + "%, Tip: " + String(tipPercent) + "%");
+      delay(750);  // Slightly longer for coordinated movement
+      sendMessage("DONE " + command);  // Echo full command with sequence
     } else {
-      sendMessage("Invalid SETTIPEJECT. Usage: SETTIPEJECT <0.0-1.0>");
-      sendMessage("Example: SETTIPEJECT 0.3");
+      sendMessage("Invalid combined command: S" + plungerStr + tipStr + ". Range: S000000-S100100");
     }
   }
   
-  // Convenience Commands
-  else if (command == "RETRACT") {
+  // Legacy convenience commands (still supported)
+  else if (baseCommand == "RETRACT") {
     setPlungerPosition(0.0);
     setTipEjectPosition(0.0);
-    sendMessage("Both actuators retracted to 0.0");
+    sendMessage("Both actuators retracted to 0% (same as S000000)");
   }
-  else if (command == "EXTEND") {
-    setPlungerPosition(1.0);
-    setTipEjectPosition(1.0);
-    sendMessage("Both actuators extended to 1.0");
-  }
-  else if (command == "RETRACTPLUNGER") {
+  else if (baseCommand == "STOP") {
+    // Emergency stop - retract everything to 0
     setPlungerPosition(0.0);
-    sendMessage("Plunger retracted to 0.0");
-  }
-  else if (command == "EXTENDPLUNGER") {
-    setPlungerPosition(1.0);
-    sendMessage("Plunger extended to 1.0");
-  }
-  else if (command == "RETRACTTIP") {
     setTipEjectPosition(0.0);
-    sendMessage("Tip eject retracted to 0.0");
+    sendMessage("STOP - Both actuators retracted to 0% (same as S000000)");
   }
-  else if (command == "EXTENDTIP") {
-    setTipEjectPosition(1.0);
-    sendMessage("Tip eject extended to 1.0");
-  }
-  
-  // LED Commands
-  else if (command.startsWith("SETCOLOR")) {
-    int r, g, b;
-    int n = sscanf(command.c_str(), "SETCOLOR %d %d %d", &r, &g, &b);
-    if (n == 3 && r >= 0 && r <= 255 && g >= 0 && g <= 255 && b >= 0 && b <= 255) {
-      setLEDColor((uint8_t)r, (uint8_t)g, (uint8_t)b);
-      sendMessage("LED color: R:" + String(r) + " G:" + String(g) + " B:" + String(b));
-    } else {
-      sendMessage("Invalid SETCOLOR. Usage: SETCOLOR r g b");
-      sendMessage("Example: SETCOLOR 255 0 128");
-    }
-  }
-  else if (command == "LEDON") {
-    turnOnLEDs();
-    sendMessage("LEDs turned on");
-  }
-  else if (command == "LEDOFF") {
-    turnOffLEDs();
-    sendMessage("LEDs turned off");
-  }
-  
+
   // System Commands
-  else if (command == "STATUS") {
+  else if (baseCommand == "STATUS") {
     sendMessage(getActuatorStatus());
   }
-  else if (command == "INIT") {
+  else if (baseCommand == "INIT") {
     initializeActuators();
     sendMessage("Actuators initialized (both retracted to 0.0)");
   }
-  else if (command == "V" || command == "v") {
+  else if (baseCommand == "V" || baseCommand == "v") {
     builtInLEDState = !builtInLEDState;
     digitalWrite(LED_BUILTIN, builtInLEDState);
     sendMessage("Built-in LED: " + String(builtInLEDState ? "ON" : "OFF"));
   }
-  else if (command == "HELP") {
+  else if (baseCommand == "HELP") {
     sendMessage("=== PIPETTE ACTUATOR COMMANDS ===");
-    sendMessage("SETPOSITION <plunger> <tip> - Set both positions (0.0-1.0)");
-    sendMessage("SETPLUNGER <pos> - Set plunger position (0.0-1.0)");
-    sendMessage("SETTIPEJECT <pos> - Set tip eject position (0.0-1.0)");
-    sendMessage("RETRACT/EXTEND - Move both to 0.0/1.0");
-    sendMessage("RETRACTPLUNGER/EXTENDPLUNGER - Move plunger to 0.0/1.0");
-    sendMessage("RETRACTTIP/EXTENDTIP - Move tip to 0.0/1.0");
-    sendMessage("SETCOLOR <r> <g> <b> - Set LED color");
+    sendMessage("PXXX - Set plunger percentage (P000-P100)");
+    sendMessage("TXXX - Set tip eject percentage (T000-T100)");
+    sendMessage("SPPPTTT - Set both (S055030 = plunger 55%, tip 30%)");
+    sendMessage("RETRACT - Move both to 0% (P000 + T000)");
+    sendMessage("STOP - Retract both actuators to 0%");
     sendMessage("STATUS - Show current positions");
-    sendMessage("INIT - Initialize actuators");
+    sendMessage("INIT - Initialize actuators to 0%");
+    sendMessage("V - Toggle built-in LED");
   }
   else {
     sendMessage("Unknown command: " + command + " (send HELP for commands)");
@@ -322,26 +284,24 @@ void setPlungerPosition(float position) {
   // Constrain position to valid range
   if (position < PLUNGER_MIN_POS) position = PLUNGER_MIN_POS;
   if (position > PLUNGER_MAX_POS) position = PLUNGER_MAX_POS;
-  
+
   // Update position and set PWM
   plungerPosition = position;
   setActuatorPWM(PLUNGER_PWM_PIN, position);
-  
-  // Small delay to allow actuator to start moving
-  delay(ACTUATOR_SETTLE_TIME);
+
+  // No blocking delay - actuator control is now non-blocking
 }
 
 void setTipEjectPosition(float position) {
   // Constrain position to valid range
   if (position < TIP_EJECT_MIN_POS) position = TIP_EJECT_MIN_POS;
   if (position > TIP_EJECT_MAX_POS) position = TIP_EJECT_MAX_POS;
-  
+
   // Update position and set PWM
   tipEjectPosition = position;
   setActuatorPWM(TIP_EJECT_PWM_PIN, position);
-  
-  // Small delay to allow actuator to start moving
-  delay(ACTUATOR_SETTLE_TIME);
+
+  // No blocking delay - actuator control is now non-blocking
 }
 
 void setActuatorPWM(int pin, float position) {

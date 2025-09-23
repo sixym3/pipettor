@@ -2,12 +2,10 @@
 
 import rclpy
 from rclpy.node import Node
-from rclpy.action import ActionServer
+from rclpy.action import ActionServer, GoalResponse, CancelResponse
 from rclpy.executors import MultiThreadedExecutor
 from control_msgs.action import FollowJointTrajectory
-from std_srvs.srv import SetBool
-from std_msgs.msg import ColorRGBA
-from sensor_msgs.msg import JointState
+from std_msgs.msg import Header
 import serial
 import time
 import threading
@@ -17,14 +15,14 @@ import re
 class PipetteDriverNode(Node):
     """
     ROS2 node for controlling pipette hardware using standard interfaces.
-    Provides FollowJointTrajectory action server and SetBool service for LED.
+    Provides FollowJointTrajectory action server for pipette control.
     """
 
     def __init__(self):
         super().__init__('pipette_driver_node')
         
         # Declare parameters
-        self.declare_parameter('serial_port', '/dev/ttyUR')
+        self.declare_parameter('serial_port', '/tmp/ttyUR')
         self.declare_parameter('baudrate', 115200)
         self.declare_parameter('timeout', 1.0)
         self.declare_parameter('plunger_max_m', 1.0)    # Percentage range [0, 1)
@@ -44,14 +42,16 @@ class PipetteDriverNode(Node):
         self.running = False
         self.response_thread = None
         
-        # Current state (percentage values [0, 1))
-        self.plunger_position_pct = 0.0
-        self.tip_position_pct = 0.0
-        self.led_on = False
-        
-        # Joint limits (percentage range [0, 1)) - now configurable via parameters
+        # Joint limits (percentage range [0, 1))
         self.PLUNGER_MAX = self.plunger_max_m
         self.TIP_MAX = self.tip_max_m
+
+        # Track command acknowledgments and completion with sequence numbers
+        self.command_sequence = 0
+        self.pending_command = None
+        self.pending_sequence = None
+        self.command_acked = False
+        self.command_done = False
         
         # Joint names for trajectory
         self.joint_names = ['plunger_joint', 'tip_eject_joint']
@@ -61,34 +61,11 @@ class PipetteDriverNode(Node):
             self,
             FollowJointTrajectory,
             'follow_joint_trajectory',
-            self.follow_joint_trajectory_callback
+            self.follow_joint_trajectory_callback,
+            goal_callback=self.goal_callback,
+            cancel_callback=self.cancel_callback
         )
         self.get_logger().info('FollowJointTrajectory action server ready')
-        
-        # Create service for LED control
-        self.led_service = self.create_service(
-            SetBool,
-            'set_led',
-            self.set_led_callback
-        )
-        
-        # Create color subscription for LED color control
-        self.color_subscription = self.create_subscription(
-            ColorRGBA,
-            'set_color',
-            self.set_color_callback,
-            10
-        )
-        
-        # Create joint state publisher
-        self.joint_state_publisher = self.create_publisher(
-            JointState,
-            'joint_states',
-            10
-        )
-        
-        # Timer for periodic joint state publishing (10Hz)
-        self.joint_state_timer = self.create_timer(0.1, self._publish_joint_states)
         
         # Initialize hardware connection
         if self.use_fake_hardware:
@@ -125,8 +102,8 @@ class PipetteDriverNode(Node):
             time.sleep(2)  # Give Arduino time to initialize
             self._send_command("INIT")
             
-            # Read initial positions
-            self._update_position_feedback()
+            # Send status command to check connection
+            self._send_command("STATUS")
             
             return True
             
@@ -145,8 +122,7 @@ class PipetteDriverNode(Node):
             # Start fake hardware response system
             self.running = True
             
-            # Initialize fake hardware positions
-            self._update_position_feedback()
+            # No position feedback in fake hardware mode either
             
             return True
             
@@ -154,12 +130,36 @@ class PipetteDriverNode(Node):
             self.get_logger().error(f"Failed to initialize fake hardware: {e}")
             return False
 
+    def goal_callback(self, goal_request):
+        """Handle goal requests - accept all valid goals"""
+        self.get_logger().info(f'Received goal request with {len(goal_request.trajectory.points)} points')
+
+        # Basic validation
+        if len(goal_request.trajectory.joint_names) != 2:
+            self.get_logger().warn('Rejecting goal: Expected 2 joints')
+            return GoalResponse.REJECT
+
+        expected_joints = ['plunger_joint', 'tip_eject_joint']
+        if goal_request.trajectory.joint_names != expected_joints:
+            self.get_logger().warn(f'Rejecting goal: Expected joints {expected_joints}')
+            return GoalResponse.REJECT
+
+        self.get_logger().info('Accepting goal request')
+        return GoalResponse.ACCEPT
+
+    def cancel_callback(self, goal_handle):
+        """Handle cancel requests - accept all cancellations"""
+        self.get_logger().info('Received cancel request')
+        return CancelResponse.ACCEPT
+
     def follow_joint_trajectory_callback(self, goal_handle):
         """Handle FollowJointTrajectory action requests"""
-        self.get_logger().info('Received joint trajectory goal')
-        
+        import time
+        current_time = time.time()
+        self.get_logger().info(f'Received joint trajectory goal at {current_time} (goal_id: {goal_handle.goal_id})')
+
         trajectory = goal_handle.request.trajectory
-        
+
         # Validate joint names
         if len(trajectory.joint_names) != 2:
             goal_handle.abort()
@@ -167,105 +167,170 @@ class PipetteDriverNode(Node):
             result.error_code = FollowJointTrajectory.Result.INVALID_JOINTS
             result.error_string = "Expected 2 joints: plunger_joint, tip_eject_joint"
             return result
-        
-        # Execute trajectory points
-        goal_handle.succeed()
-        
-        for point in trajectory.points:
+
+        # Validate expected joint names
+        expected_joints = ['plunger_joint', 'tip_eject_joint']
+        if trajectory.joint_names != expected_joints:
+            goal_handle.abort()
+            result = FollowJointTrajectory.Result()
+            result.error_code = FollowJointTrajectory.Result.INVALID_JOINTS
+            result.error_string = f"Expected joints {expected_joints}, got {trajectory.joint_names}"
+            return result
+
+        # Execute trajectory points with proper cancellation checking
+        self.get_logger().info(f'Executing trajectory with {len(trajectory.points)} points for goal {goal_handle.goal_id}')
+
+        for i, point in enumerate(trajectory.points):
+            # Check for cancellation before each point
+            if goal_handle.is_cancel_requested:
+                self.get_logger().info('Trajectory execution canceled')
+                # Send emergency stop to Arduino
+                if not self.use_fake_hardware:
+                    self._send_command("STOP")
+                goal_handle.canceled()
+                result = FollowJointTrajectory.Result()
+                result.error_code = FollowJointTrajectory.Result.PATH_TOLERANCE_VIOLATED
+                result.error_string = "Trajectory canceled by user"
+                return result
+
             if len(point.positions) != 2:
+                self.get_logger().warn(f"Point {i} has {len(point.positions)} positions, expected 2")
                 continue
-                
+
             plunger_pos = point.positions[0]
             tip_pos = point.positions[1]
-            
+
             # Validate positions (percentage range [0, 1))
-            if not (0.0 <= plunger_pos < self.PLUNGER_MAX):
-                self.get_logger().warn(f"Plunger position {plunger_pos:.3f} out of range [0, 1)")
+            if not (0.0 <= plunger_pos <= self.PLUNGER_MAX):
+                self.get_logger().warn(f"Point {i}: Plunger position {plunger_pos:.3f} out of range [0, {self.PLUNGER_MAX}]")
                 continue
-                
-            if not (0.0 <= tip_pos < self.TIP_MAX):
-                self.get_logger().warn(f"Tip position {tip_pos:.3f} out of range [0, 1)")
+
+            if not (0.0 <= tip_pos <= self.TIP_MAX):
+                self.get_logger().warn(f"Point {i}: Tip position {tip_pos:.3f} out of range [0, {self.TIP_MAX}]")
                 continue
-            
-            # Send combined command to Arduino (direct percentage values)
+
+            self.get_logger().info(f'Executing point {i+1}/{len(trajectory.points)}: plunger={plunger_pos:.3f}, tip={tip_pos:.3f}')
+
+            # Send feedback when starting each point
+            start_feedback = FollowJointTrajectory.Feedback()
+            start_feedback.header.stamp = self.get_clock().now().to_msg()
+            start_feedback.joint_names = ['plunger_joint', 'tip_eject_joint']
+            start_feedback.desired.positions = [plunger_pos, tip_pos]
+            start_feedback.desired.time_from_start = point.time_from_start
+            # Note: actual positions not available - no feedback from linear actuators
+            goal_handle.publish_feedback(start_feedback)
+
+            # Send combined command to Arduino with enhanced feedback
             if self.use_fake_hardware:
-                # In fake hardware mode, update positions immediately
-                self.plunger_position_pct = plunger_pos
-                self.tip_position_pct = tip_pos
-                self.get_logger().debug(f"Fake HW: Set positions to plunger={plunger_pos:.3f}, tip={tip_pos:.3f}")
+                success = True
+                self.get_logger().info(f"Fake HW: Processing point {i+1} - plunger={plunger_pos:.3f}, tip={tip_pos:.3f}")
             else:
-                self._send_command(f"SETPOSITION {plunger_pos:.3f} {tip_pos:.3f}")
-            
-            # Wait for movement to complete
-            time.sleep(1.0)  # Simple wait - could be improved with feedback
-            
-            # Send feedback
-            feedback = FollowJointTrajectory.Feedback()
-            self._update_position_feedback()
-            feedback.actual.positions = [
-                self.plunger_position_pct,
-                self.tip_position_pct
-            ]
-            goal_handle.publish_feedback(feedback)
-        
-        # Return result
+                # Convert to percentages and use new protocol with sequence number
+                plunger_pct = int(plunger_pos * 100)
+                tip_pct = int(tip_pos * 100)
+
+                # Increment sequence number and generate command with sequence
+                self.command_sequence = (self.command_sequence + 1) % 1000  # Roll over after 999
+                command_with_seq = f"S{plunger_pct:03d}{tip_pct:03d}_{self.command_sequence:03d}"
+
+                # Reset command tracking for new sequence
+                self.pending_command = f"S{plunger_pct:03d}{tip_pct:03d}"
+                self.pending_sequence = self.command_sequence
+                self.command_acked = False
+                self.command_done = False
+
+                success = self._send_command(command_with_seq)
+                self.get_logger().info(f"Sent command {command_with_seq} (sequence {self.command_sequence})")
+
+            if not success:
+                self.get_logger().error(f"Failed to send command for point {i}: {command_with_seq if not self.use_fake_hardware else 'fake command'}")
+                goal_handle.abort()
+                result = FollowJointTrajectory.Result()
+                result.error_code = FollowJointTrajectory.Result.INVALID_GOAL
+                result.error_string = f"Failed to execute point {i}: Command transmission failed"
+                return result
+
+            # Non-blocking wait with cancellation checking
+            if not self._wait_for_movement_with_cancellation(goal_handle, point.time_from_start):
+                # Cancellation occurred during wait
+                if not self.use_fake_hardware:
+                    self._send_command("STOP")
+                goal_handle.canceled()
+                result = FollowJointTrajectory.Result()
+                result.error_code = FollowJointTrajectory.Result.PATH_TOLERANCE_VIOLATED
+                result.error_string = "Trajectory canceled during execution"
+                return result
+
+            # Send completion feedback for this point
+            completion_feedback = FollowJointTrajectory.Feedback()
+            completion_feedback.header.stamp = self.get_clock().now().to_msg()
+            completion_feedback.joint_names = ['plunger_joint', 'tip_eject_joint']
+            completion_feedback.desired.positions = [plunger_pos, tip_pos]
+            completion_feedback.desired.time_from_start = point.time_from_start
+            # Note: We assume movement is complete after waiting the specified time
+            # but have no actual position feedback to confirm this
+            goal_handle.publish_feedback(completion_feedback)
+
+        # Trajectory completed successfully
+        goal_handle.succeed()
         result = FollowJointTrajectory.Result()
         result.error_code = FollowJointTrajectory.Result.SUCCESSFUL
         result.error_string = "Trajectory completed successfully"
-        
-        self.get_logger().info('Joint trajectory completed successfully')
+
+        self.get_logger().info(f'Joint trajectory completed successfully for goal {goal_handle.goal_id}')
         return result
 
-    def set_led_callback(self, request, response):
-        """Handle SetBool service requests for LED control"""
-        self.get_logger().info(f'Received LED request: {request.data}')
-        
-        # Send LED command to Arduino
-        if self.use_fake_hardware:
-            # In fake hardware mode, just simulate LED control
-            self.led_on = request.data
-            success = True
-            self.get_logger().debug(f"Fake HW: LED set to {'ON' if request.data else 'OFF'}")
-        else:
-            cmd = "SETCOLOR 255 255 255" if request.data else "SETCOLOR 00 00 00"
-            success = self._send_command(cmd)
-        
-        if success:
-            self.led_on = request.data
-            
-        response.success = success
-        response.message = f"LED {'on' if request.data else 'off'}" if success else "LED command failed"
-        
-        self.get_logger().info(f'LED service completed: success={response.success}')
-        return response
+    def _wait_for_movement_with_cancellation(self, goal_handle, target_time):
+        """
+        Wait for Arduino DONE signal or timeout with cancellation checking.
+        Returns False if canceled, True if completed.
+        """
+        import rclpy
 
-    def set_color_callback(self, msg):
-        """Handle ColorRGBA topic messages for LED color control"""
-        # Convert float values (0.0-1.0) to int values (0-255)
-        r = int(msg.r * 255)
-        g = int(msg.g * 255) 
-        b = int(msg.b * 255)
-        
-        # Clamp values to valid range
-        r = max(0, min(255, r))
-        g = max(0, min(255, g))
-        b = max(0, min(255, b))
-        
-        self.get_logger().info(f'Received color command: R={r}, G={g}, B={b}')
-        
-        # Send SETCOLOR command to Arduino
+        # Convert target_time to seconds
+        if hasattr(target_time, 'sec') and hasattr(target_time, 'nanosec'):
+            target_seconds = target_time.sec + target_time.nanosec * 1e-9
+        else:
+            target_seconds = 1.0  # Default fallback
+
+        # Use minimum 1 second, maximum 10 seconds for safety
+        timeout = max(1.0, min(10.0, target_seconds))
+
+        # Check for cancellation and DONE signal every 0.1 seconds
+        check_interval = 0.1
+        elapsed_time = 0.0
+
         if self.use_fake_hardware:
-            # In fake hardware mode, just simulate color control
-            success = True
-            self.get_logger().debug(f"Fake HW: Color set to R={r}, G={g}, B={b}")
+            # In fake hardware mode, just wait for time
+            while elapsed_time < timeout:
+                if goal_handle.is_cancel_requested:
+                    self.get_logger().info(f'Cancellation requested during movement wait (elapsed: {elapsed_time:.2f}s)')
+                    return False
+                time.sleep(check_interval)
+                elapsed_time += check_interval
+                # Removed rclpy.spin_once() - causes deadlock in action callback
+            return True
         else:
-            cmd = f"SETCOLOR {r} {g} {b}"
-            success = self._send_command(cmd)
-        
-        if success:
-            self.get_logger().info(f'Color set successfully')
-        else:
-            self.get_logger().error(f'Failed to set color')
+            # Real hardware: wait for DONE signal or timeout
+            # Note: Cannot call spin_once() from action callback - would cause deadlock
+            # Arduino responses are processed by background thread, so command_done will update
+            while elapsed_time < timeout:
+                if goal_handle.is_cancel_requested:
+                    self.get_logger().info(f'Cancellation requested during movement wait (elapsed: {elapsed_time:.2f}s)')
+                    return False
+
+                # Check if Arduino sent DONE signal for current command
+                if self.command_done:
+                    self.get_logger().info(f'Movement completed via DONE signal for sequence {self.pending_sequence} (elapsed: {elapsed_time:.2f}s)')
+                    return True
+
+                time.sleep(check_interval)
+                elapsed_time += check_interval
+                # Removed rclpy.spin_once() - causes deadlock in action callback
+
+            # Timeout occurred - log warning but continue
+            self.get_logger().warn(f'Movement timeout after {timeout:.1f}s for sequence {self.pending_sequence}, assuming complete')
+            return True
 
     def _send_command(self, command: str) -> bool:
         """Send command to Arduino"""
@@ -304,84 +369,52 @@ class PipetteDriverNode(Node):
             time.sleep(0.01)
 
     def _process_response(self, response: str):
-        """Process responses from Arduino to extract position feedback"""
+        """Process responses from Arduino (no position feedback available)"""
         self.get_logger().debug(f"Arduino response: {response}")
-        
-        try:
-            # Look for position information in responses
-            # Supports multiple formats:
-            # - STATUS: PLUNGER=0.500, TIP=0.300
-            # - POS:0.500,0.300
-            # - PLUNGER=0.500 TIP=0.300
-            
-            # Try new compact format first: POS:plunger,tip
-            pos_match = re.search(r'POS:([0-9]*\.?[0-9]+),([0-9]*\.?[0-9]+)', response)
-            if pos_match:
-                plunger_pos = float(pos_match.group(1))
-                tip_pos = float(pos_match.group(2))
-                
-                # Validate range
-                if 0.0 <= plunger_pos < self.PLUNGER_MAX:
-                    self.plunger_position_pct = plunger_pos
-                if 0.0 <= tip_pos < self.TIP_MAX:
-                    self.tip_position_pct = tip_pos
-                    
-                self.get_logger().debug(f"Parsed positions: plunger={plunger_pos:.3f}, tip={tip_pos:.3f}")
-                return
-            
-            # Fall back to individual parsing (legacy format)
-            plunger_match = re.search(r'PLUNGER=([0-9]*\.?[0-9]+)', response)
-            if plunger_match:
-                plunger_pos = float(plunger_match.group(1))
-                if 0.0 <= plunger_pos < self.PLUNGER_MAX:
-                    self.plunger_position_pct = plunger_pos
-                    
-            tip_match = re.search(r'TIP=([0-9]*\.?[0-9]+)', response)
-            if tip_match:
-                tip_pos = float(tip_match.group(1))
-                if 0.0 <= tip_pos < self.TIP_MAX:
-                    self.tip_position_pct = tip_pos
-                    
-        except (ValueError, IndexError) as e:
-            self.get_logger().warn(f"Failed to parse Arduino response '{response}': {e}")
 
-    def _update_position_feedback(self):
-        """Request position status from Arduino"""
-        if self.use_fake_hardware:
-            # In fake hardware mode, positions are already updated when commands are sent
-            self.get_logger().debug(f"Fake HW: Current positions - plunger={self.plunger_position_pct:.3f}, tip={self.tip_position_pct:.3f}")
-        else:
-            self._send_command("STATUS")
-            time.sleep(0.05)  # Small delay to allow response
+        # Handle command acknowledgments and completion signals with sequence tracking
+        if response.startswith("ACK "):
+            full_command = response[4:].strip()
+            # Parse command with sequence: S055030_001
+            if "_" in full_command:
+                try:
+                    command_part, seq_part = full_command.rsplit("_", 1)
+                    sequence = int(seq_part)
 
-    def _publish_joint_states(self):
-        """Publish current joint states for RViz/MoveIt feedback"""
-        msg = JointState()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = ""
-        
-        # Joint names must match URDF
-        msg.name = ['plunger_joint', 'tip_eject_joint']
-        
-        # Current positions (from Arduino feedback or mock values)
-        msg.position = [
-            float(self.plunger_position_pct),
-            float(self.tip_position_pct)
-        ]
-        
-        # Velocities (could be enhanced with actual velocity feedback later)
-        msg.velocity = [0.0, 0.0]
-        
-        # Efforts (not used for pipette)
-        msg.effort = [0.0, 0.0]
-        
-        self.joint_state_publisher.publish(msg)
-        
-        # Debug logging for joint state publishing
-        self.get_logger().debug(
-            f"Publishing joint states: plunger={self.plunger_position_pct:.3f}, "
-            f"tip={self.tip_position_pct:.3f}"
-        )
+                    if command_part == self.pending_command and sequence == self.pending_sequence:
+                        self.command_acked = True
+                        self.get_logger().debug(f"Command acknowledged: {full_command}")
+                    else:
+                        self.get_logger().warn(f"Received ACK for wrong command/sequence: {full_command}, expected: {self.pending_command}_{self.pending_sequence:03d}")
+                except (ValueError, AttributeError):
+                    self.get_logger().warn(f"Invalid ACK format: {full_command}")
+            else:
+                # Legacy format without sequence - still support for backwards compatibility
+                if full_command == self.pending_command:
+                    self.command_acked = True
+                    self.get_logger().debug(f"Command acknowledged (legacy): {full_command}")
+
+        elif response.startswith("DONE "):
+            full_command = response[5:].strip()
+            # Parse command with sequence: S055030_001
+            if "_" in full_command:
+                try:
+                    command_part, seq_part = full_command.rsplit("_", 1)
+                    sequence = int(seq_part)
+
+                    if command_part == self.pending_command and sequence == self.pending_sequence:
+                        self.command_done = True
+                        self.get_logger().debug(f"Command completed: {full_command}")
+                    else:
+                        self.get_logger().warn(f"Received DONE for wrong command/sequence: {full_command}, expected: {self.pending_command}_{self.pending_sequence:03d}")
+                except (ValueError, AttributeError):
+                    self.get_logger().warn(f"Invalid DONE format: {full_command}")
+            else:
+                # Legacy format without sequence - still support for backwards compatibility
+                if full_command == self.pending_command:
+                    self.command_done = True
+                    self.get_logger().debug(f"Command completed (legacy): {full_command}")
+
 
     def destroy_node(self):
         """Clean shutdown"""
