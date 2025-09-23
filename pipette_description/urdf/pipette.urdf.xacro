@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://ros.org/wiki/xacro" name="pipette">
+  <xacro:arg name="parent" default="tool0"/>
+
+  <xacro:include filename="$(find pipette_description)/urdf/pipette_macro.urdf.xacro"/>
+
+  <link name="$(arg parent)"/>
+  <xacro:pipette
+    name="pipette"
+    prefix=""
+    parent="$(arg parent)"
+  />
+</robot>

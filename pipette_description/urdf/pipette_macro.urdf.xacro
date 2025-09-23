@@ -1,0 +1,142 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://ros.org/wiki/xacro">
+  <!--
+    Static URDF description for pipette tool
+    Replace placeholder meshes with your actual CAD files
+  -->
+
+
+  <xacro:macro
+    name="pipette"
+    params="name
+            prefix
+            parent
+            pipette_mass:=0.200
+            xyz:='0 0 0'
+            rpy:='0 0 0'"
+  >
+
+    <!-- Pipette physical dimensions (adjust based on your CAD) -->
+    <xacro:property name="pipette_length" value="0.34"/>  <!-- 15cm length -->
+    <xacro:property name="pipette_radius" value="0.02"/>   <!-- 2cm radius -->
+
+    <!-- Base position and orientation for all components -->
+    <xacro:property name="base_xyz_x" value="-0.0860"/>
+    <xacro:property name="base_xyz_y" value="-0.3224"/>
+    <xacro:property name="base_xyz_z" value="-0.058"/>
+    <xacro:property name="base_rpy_x" value="0"/>
+    <xacro:property name="base_rpy_y" value="0"/>
+    <xacro:property name="base_rpy_z" value="0"/>
+
+    <!-- Visual component offsets -->
+    <xacro:property name="visual_xyz_offset_x" value="0"/>
+    <xacro:property name="visual_xyz_offset_y" value="0.0043"/>
+    <xacro:property name="visual_xyz_offset_z" value="0.0183" />
+    <xacro:property name="visual_rpy_offset_x" value="0"/>
+    <xacro:property name="visual_rpy_offset_y" value="0"/>
+    <xacro:property name="visual_rpy_offset_z" value="0"/>
+
+    <!-- Collision component offsets -->
+    <xacro:property name="collision_xyz_offset_x" value="0"/>
+    <xacro:property name="collision_xyz_offset_y" value="0"/>
+    <xacro:property name="collision_xyz_offset_z" value="0"/>
+    <xacro:property name="collision_rpy_offset_x" value="0"/>
+    <xacro:property name="collision_rpy_offset_y" value="0"/>
+    <xacro:property name="collision_rpy_offset_z" value="0"/>
+
+    <!-- Inertial component offsets -->
+    <xacro:property name="inertial_xyz_offset_x" value="0"/>
+    <xacro:property name="inertial_xyz_offset_y" value="0"/>
+    <xacro:property name="inertial_xyz_offset_z" value="0"/>
+    <xacro:property name="inertial_rpy_offset_x" value="0"/>
+    <xacro:property name="inertial_rpy_offset_y" value="0"/>
+    <xacro:property name="inertial_rpy_offset_z" value="0"/>
+
+    <!-- Main attachment joint -->
+    <joint name="${prefix}pipette_attachment_joint" type="fixed">
+      <origin xyz="${xyz}" rpy="${rpy}"/>
+      <parent link="${parent}"/>
+      <child link="${prefix}pipette_base_link"/>
+    </joint>
+
+    <!-- Main pipette body (base positioning) -->
+    <link name="${prefix}pipette_base_link"/>
+
+    <!-- Intermediate joint for 90-degree rotation -->
+    <joint name="${prefix}pipette_orientation_joint" type="fixed">
+      <origin xyz="-0.09 -0.055 ${pipette_length}" rpy="${base_rpy_x - 1.5708} ${base_rpy_y} ${base_rpy_z}"/>
+      <parent link="${prefix}pipette_base_link"/>
+      <child link="${prefix}pipette_body_link"/>
+    </joint>
+
+    <!-- Pipette body link with visual, collision and inertial -->
+    <link name="${prefix}pipette_body_link">
+      <visual>
+        <origin xyz="${visual_xyz_offset_x} ${visual_xyz_offset_y} ${visual_xyz_offset_z}" 
+                rpy="${visual_rpy_offset_x} ${visual_rpy_offset_y} ${visual_rpy_offset_z}"/>
+        <geometry>
+          <!-- Replace this cylinder with your CAD mesh -->
+          <mesh filename="package://pipette_description/meshes/visual/pipettor_visual.stl" scale="0.001 0.001 0.001" />
+          <!-- <cylinder length="${pipette_length}" radius="${pipette_radius}"/> -->
+        </geometry>
+        <material name="pipette_gray">
+          <color rgba="0.7 0.7 0.7 1.0"/>
+        </material>
+      </visual>
+
+      <collision>
+        <origin xyz="${collision_xyz_offset_x} ${collision_xyz_offset_y} ${collision_xyz_offset_z}" 
+                rpy="${collision_rpy_offset_x} ${collision_rpy_offset_y} ${collision_rpy_offset_z}"/>
+        <geometry>
+          <!-- Replace this cylinder with simplified collision mesh -->
+          <mesh filename="package://pipette_description/meshes/collision/pipettor_collision.stl" scale="0.001 0.001 0.001" /> 
+          <!-- <cylinder length="${pipette_length}" radius="${pipette_radius}"/> -->
+        </geometry>
+      </collision>
+
+      <inertial>
+        <origin xyz="${inertial_xyz_offset_x} ${inertial_xyz_offset_y} ${inertial_xyz_offset_z}" 
+                rpy="${inertial_rpy_offset_x} ${inertial_rpy_offset_y} ${inertial_rpy_offset_z}"/>
+        <mass value="${pipette_mass}"/>
+        <inertia ixx="${pipette_mass * (3 * pipette_radius * pipette_radius + pipette_length * pipette_length) / 12}"
+                 ixy="0.0"
+                 ixz="0.0"
+                 iyy="${pipette_mass * (3 * pipette_radius * pipette_radius + pipette_length * pipette_length) / 12}"
+                 iyz="0.0"
+                 izz="${pipette_mass * pipette_radius * pipette_radius / 2}"/>
+      </inertial>
+    </link>
+
+    <!-- LED strip (visual element only) -->
+    <joint name="${prefix}led_strip_joint" type="fixed">
+      <origin xyz="0 ${pipette_radius + 0.005} ${pipette_length * 0.7}" rpy="0 0 0"/>
+      <parent link="${prefix}pipette_base_link"/>
+      <child link="${prefix}led_strip_link"/>
+    </joint>
+
+    <link name="${prefix}led_strip_link">
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <box size="0.002 0.001 0.02"/>  <!-- Small LED strip representation -->
+        </geometry>
+        <material name="led_strip">
+          <color rgba="0.0 0.0 1.0 1.0"/>  <!-- Blue when off -->
+        </material>
+      </visual>
+    </link>
+
+    <!-- Plunger and tip ejection are handled by external driver -->
+    <!-- No joints needed - pipette control is managed outside of MoveIt -->
+
+    <!-- Tool tip reference frame -->
+    <joint name="${prefix}pipette_tip_joint" type="fixed">
+      <origin xyz="0 0 ${pipette_length}" rpy="0 0 0"/>
+      <parent link="${prefix}pipette_base_link"/>
+      <child link="${prefix}pipette_tip_link"/>
+    </joint>
+
+    <link name="${prefix}pipette_tip_link"/>
+
+  </xacro:macro>
+</robot>
