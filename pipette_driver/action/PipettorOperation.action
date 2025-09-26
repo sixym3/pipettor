@@ -1,0 +1,16 @@
+# Goal
+string operation        # "SUCK", "EXPEL", "EJECT_TIP", "SET_LED"
+float64 volume_pct     # 0.0-1.0 (future use for variable volumes)
+std_msgs/ColorRGBA led_color  # for SET_LED operation
+---
+# Result
+bool success
+string message
+float64 final_plunger_position
+float64 final_tip_position
+---
+# Feedback
+string current_phase           # "EXTENDING", "RETRACTING", "COMPLETE"
+float64 plunger_position      # current position 0.0-1.0
+float64 tip_position          # current position 0.0-1.0
+float64 progress              # overall progress 0.0-1.0

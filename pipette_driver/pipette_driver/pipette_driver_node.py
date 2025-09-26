@@ -5,7 +5,9 @@ from rclpy.node import Node
 from rclpy.action import ActionServer, GoalResponse, CancelResponse
 from rclpy.executors import MultiThreadedExecutor
 from control_msgs.action import FollowJointTrajectory
-from std_msgs.msg import Header
+from pipette_driver.action import PipettorOperation
+from std_msgs.msg import Header, ColorRGBA
+from std_srvs.srv import SetBool
 import serial
 import time
 import threading
@@ -56,7 +58,7 @@ class PipetteDriverNode(Node):
         # Joint names for trajectory
         self.joint_names = ['plunger_joint', 'tip_eject_joint']
         
-        # Create action server for trajectory following
+        # Create action server for trajectory following (legacy/internal interface)
         self.trajectory_server = ActionServer(
             self,
             FollowJointTrajectory,
@@ -66,6 +68,35 @@ class PipetteDriverNode(Node):
             cancel_callback=self.cancel_callback
         )
         self.get_logger().info('FollowJointTrajectory action server ready')
+
+        # Create high-level pipettor operation action server
+        self.pipettor_server = ActionServer(
+            self,
+            PipettorOperation,
+            'pipettor_operation',
+            self.pipettor_operation_callback,
+            goal_callback=self.pipettor_goal_callback,
+            cancel_callback=self.pipettor_cancel_callback
+        )
+        self.get_logger().info('PipettorOperation action server ready')
+
+        # LED control interfaces
+        self.led_service = self.create_service(
+            SetBool,
+            'led_control',
+            self.led_control_callback
+        )
+        self.led_color_subscriber = self.create_subscription(
+            ColorRGBA,
+            'led_color',
+            self.led_color_callback,
+            10
+        )
+        self.get_logger().info('LED control interfaces ready')
+
+        # Current LED state
+        self.led_enabled = False
+        self.led_color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=1.0)  # Default white
         
         # Initialize hardware connection
         if self.use_fake_hardware:
@@ -415,6 +446,263 @@ class PipetteDriverNode(Node):
                     self.command_done = True
                     self.get_logger().debug(f"Command completed (legacy): {full_command}")
 
+    # PipettorOperation Action Server Methods
+    def pipettor_goal_callback(self, goal_request):
+        """Handle PipettorOperation goal requests"""
+        operation = goal_request.operation.upper()
+        valid_operations = ["SUCK", "EXPEL", "EJECT_TIP", "SET_LED"]
+
+        if operation not in valid_operations:
+            self.get_logger().warn(f'Rejecting goal: Invalid operation "{operation}". Valid: {valid_operations}')
+            return GoalResponse.REJECT
+
+        self.get_logger().info(f'Accepting PipettorOperation goal: {operation}')
+        return GoalResponse.ACCEPT
+
+    def pipettor_cancel_callback(self, goal_handle):
+        """Handle PipettorOperation cancel requests"""
+        self.get_logger().info('Received cancel request for PipettorOperation')
+        return CancelResponse.ACCEPT
+
+    def pipettor_operation_callback(self, goal_handle):
+        """Handle PipettorOperation action requests"""
+        operation = goal_handle.request.operation.upper()
+        volume_pct = goal_handle.request.volume_pct
+        led_color = goal_handle.request.led_color
+
+        self.get_logger().info(f'Executing PipettorOperation: {operation}')
+
+        # Initialize result
+        result = PipettorOperation.Result()
+        result.final_plunger_position = 0.0
+        result.final_tip_position = 0.0
+
+        try:
+            if operation == "SUCK":
+                success = self._execute_suck_sequence(goal_handle)
+                result.final_plunger_position = 0.0  # Always returns to 0 after suck
+                result.final_tip_position = 0.0
+
+            elif operation == "EXPEL":
+                success = self._execute_expel_sequence(goal_handle)
+                result.final_plunger_position = 0.0  # Always returns to 0 after expel
+                result.final_tip_position = 0.0
+
+            elif operation == "EJECT_TIP":
+                success = self._execute_eject_sequence(goal_handle)
+                result.final_plunger_position = 0.0
+                result.final_tip_position = 0.0  # Always returns to 0 after eject
+
+            elif operation == "SET_LED":
+                success = self._execute_led_operation(led_color)
+                result.final_plunger_position = 0.0  # LED operation doesn't affect actuators
+                result.final_tip_position = 0.0
+
+            else:
+                success = False
+                result.message = f"Unknown operation: {operation}"
+
+            if success:
+                goal_handle.succeed()
+                result.success = True
+                result.message = f"{operation} operation completed successfully"
+                self.get_logger().info(f'PipettorOperation {operation} completed successfully')
+            else:
+                goal_handle.abort()
+                result.success = False
+                if not result.message:
+                    result.message = f"Failed to execute {operation} operation"
+                self.get_logger().error(f'PipettorOperation {operation} failed: {result.message}')
+
+        except Exception as e:
+            goal_handle.abort()
+            result.success = False
+            result.message = f"Error during {operation}: {str(e)}"
+            self.get_logger().error(f'PipettorOperation {operation} error: {e}')
+
+        return result
+
+    def _execute_suck_sequence(self, goal_handle):
+        """Execute hardcoded suck sequence: 0→55→0 over 5 seconds"""
+        sequence_points = [
+            (0.0, 0.0, 0.0),     # Start position (plunger, tip, time)
+            (0.55, 0.0, 2.5),    # Extend to suction position at 2.5 seconds
+            (0.0, 0.0, 5.0)      # Return to start at 5 seconds
+        ]
+
+        return self._execute_sequence(goal_handle, sequence_points, "SUCK",
+                                     ["EXTENDING", "RETRACTING", "COMPLETE"])
+
+    def _execute_expel_sequence(self, goal_handle):
+        """Execute hardcoded expel sequence: 0→77→0 over 5 seconds"""
+        sequence_points = [
+            (0.0, 0.0, 0.0),     # Start position (plunger, tip, time)
+            (0.77, 0.0, 2.5),    # Extend to expel position at 2.5 seconds
+            (0.0, 0.0, 5.0)      # Return to start at 5 seconds
+        ]
+
+        return self._execute_sequence(goal_handle, sequence_points, "EXPEL",
+                                     ["EXTENDING", "RETRACTING", "COMPLETE"])
+
+    def _execute_eject_sequence(self, goal_handle):
+        """Execute hardcoded tip eject sequence: 0→30→0 over 5 seconds"""
+        sequence_points = [
+            (0.0, 0.0, 0.0),     # Start position (plunger, tip, time)
+            (0.0, 0.30, 2.5),    # Extend tip ejector at 2.5 seconds
+            (0.0, 0.0, 5.0)      # Return to start at 5 seconds
+        ]
+
+        return self._execute_sequence(goal_handle, sequence_points, "EJECT_TIP",
+                                     ["EXTENDING", "RETRACTING", "COMPLETE"])
+
+    def _execute_sequence(self, goal_handle, sequence_points, operation_name, phases):
+        """Execute a trajectory sequence with feedback"""
+        total_points = len(sequence_points)
+
+        for i, (plunger_pos, tip_pos, target_time) in enumerate(sequence_points):
+            # Check for cancellation
+            if goal_handle.is_cancel_requested:
+                self.get_logger().info(f'{operation_name} sequence canceled')
+                if not self.use_fake_hardware:
+                    self._send_command("STOP")
+                goal_handle.canceled()
+                return False
+
+            # Determine current phase
+            if i < len(phases):
+                current_phase = phases[i]
+            else:
+                current_phase = phases[-1]
+
+            # Calculate progress (0.0 to 1.0)
+            progress = (i + 1) / total_points
+
+            # Send feedback
+            feedback = PipettorOperation.Feedback()
+            feedback.current_phase = current_phase
+            feedback.plunger_position = plunger_pos
+            feedback.tip_position = tip_pos
+            feedback.progress = progress
+            goal_handle.publish_feedback(feedback)
+
+            self.get_logger().info(f'{operation_name} point {i+1}/{total_points}: '
+                                 f'plunger={plunger_pos:.3f}, tip={tip_pos:.3f}, phase={current_phase}')
+
+            # Execute the trajectory point using internal FollowJointTrajectory
+            success = self._execute_trajectory_point(plunger_pos, tip_pos, target_time, goal_handle)
+            if not success:
+                return False
+
+        return True
+
+    def _execute_trajectory_point(self, plunger_pos, tip_pos, target_time, goal_handle):
+        """Execute a single trajectory point using the internal trajectory system"""
+        if self.use_fake_hardware:
+            # In fake hardware mode, just wait for the target time
+            if target_time > 0:
+                time.sleep(min(target_time, 2.0))  # Cap at 2 seconds for safety
+            return True
+
+        # Real hardware: send command to Arduino
+        plunger_pct = int(plunger_pos * 100)
+        tip_pct = int(tip_pos * 100)
+
+        # Increment sequence number and generate command
+        self.command_sequence = (self.command_sequence + 1) % 1000
+        command_with_seq = f"S{plunger_pct:03d}{tip_pct:03d}_{self.command_sequence:03d}"
+
+        # Reset command tracking
+        self.pending_command = f"S{plunger_pct:03d}{tip_pct:03d}"
+        self.pending_sequence = self.command_sequence
+        self.command_acked = False
+        self.command_done = False
+
+        success = self._send_command(command_with_seq)
+        if not success:
+            self.get_logger().error(f"Failed to send command: {command_with_seq}")
+            return False
+
+        # Wait for completion with cancellation checking
+        return self._wait_for_movement_with_cancellation_simple(goal_handle, target_time)
+
+    def _wait_for_movement_with_cancellation_simple(self, goal_handle, target_time):
+        """Simplified wait for movement completion with cancellation checking"""
+        timeout = max(1.0, min(10.0, target_time if target_time > 0 else 1.0))
+        check_interval = 0.1
+        elapsed_time = 0.0
+
+        while elapsed_time < timeout:
+            if goal_handle.is_cancel_requested:
+                return False
+
+            # Check if Arduino sent DONE signal
+            if self.command_done:
+                self.get_logger().debug(f'Movement completed via DONE signal (elapsed: {elapsed_time:.2f}s)')
+                return True
+
+            time.sleep(check_interval)
+            elapsed_time += check_interval
+
+        # Timeout - assume complete
+        self.get_logger().warn(f'Movement timeout after {timeout:.1f}s, assuming complete')
+        return True
+
+    def _execute_led_operation(self, led_color):
+        """Execute LED color change operation"""
+        self.led_color = led_color
+        self.led_enabled = True
+
+        if self.use_fake_hardware:
+            self.get_logger().info(f'Fake HW: Setting LED color to R={led_color.r:.2f}, '
+                                  f'G={led_color.g:.2f}, B={led_color.b:.2f}')
+            return True
+
+        # Convert RGB to Arduino format (0-255)
+        r = int(led_color.r * 255)
+        g = int(led_color.g * 255)
+        b = int(led_color.b * 255)
+
+        # Send LED command to Arduino
+        led_command = f"LED{r:03d}{g:03d}{b:03d}"
+        success = self._send_command(led_command)
+
+        if success:
+            self.get_logger().info(f'LED color set to R={r}, G={g}, B={b}')
+        else:
+            self.get_logger().error(f'Failed to set LED color')
+
+        return success
+
+    # LED Service and Topic Callbacks
+    def led_control_callback(self, request, response):
+        """Handle LED on/off service requests"""
+        self.led_enabled = request.data
+
+        if self.use_fake_hardware:
+            self.get_logger().info(f'Fake HW: LED {"enabled" if self.led_enabled else "disabled"}')
+            response.success = True
+            response.message = f'LED {"enabled" if self.led_enabled else "disabled"}'
+            return response
+
+        if self.led_enabled:
+            # Turn on LED with current color
+            success = self._execute_led_operation(self.led_color)
+        else:
+            # Turn off LED (set to black)
+            off_color = ColorRGBA(r=0.0, g=0.0, b=0.0, a=1.0)
+            success = self._execute_led_operation(off_color)
+
+        response.success = success
+        response.message = f'LED {"enabled" if self.led_enabled else "disabled"}' if success else 'LED control failed'
+        return response
+
+    def led_color_callback(self, msg):
+        """Handle LED color topic messages"""
+        self.led_color = msg
+        if self.led_enabled:
+            # Only update LED if it's currently enabled
+            self._execute_led_operation(msg)
+            self.get_logger().info(f'Updated LED color: R={msg.r:.2f}, G={msg.g:.2f}, B={msg.b:.2f}')
 
     def destroy_node(self):
         """Clean shutdown"""
