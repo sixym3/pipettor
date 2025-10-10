@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import serial
 import time
-import sys
 import threading
 
 # Configuration
@@ -18,7 +17,7 @@ def read_responses(ser):
                 if response:
                     timestamp = time.strftime("%H:%M:%S")
                     print(f"[{timestamp}] Arduino: {response}")
-        except Exception as e:
+        except Exception:
             # Silent exit when main thread closes serial port
             break
 
@@ -35,7 +34,7 @@ def send_command(ser, command):
     print(f"[{timestamp}] Sending: {repr(command.strip())} ({len(cmd_bytes)} bytes)")
     
     try:
-        bytes_written = ser.write(cmd_bytes)
+        ser.write(cmd_bytes)
         ser.flush()  # Ensure data is sent
         return True
     except Exception as e:
@@ -57,7 +56,7 @@ def main():
             bytesize=serial.EIGHTBITS
         )
         
-        print(f"Connected successfully!")
+        print("Connected successfully!")
         print("\nInstructions:")
         print("- Press Enter (empty) to send 'V' (toggle LED)")
         print("- Type any command and press Enter to send it")

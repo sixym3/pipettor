@@ -126,7 +126,7 @@ class JointStateBridge(Node):
         goal.trajectory.points = [point]
         
         # Send goal (fire and forget - don't wait for result)
-        future = self.trajectory_client.send_goal_async(goal)
+        self.trajectory_client.send_goal_async(goal)
         
         self.get_logger().debug(
             f'Sent trajectory: plunger={point.positions[0]:.4f}m, '

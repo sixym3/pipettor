@@ -52,7 +52,7 @@ def generate_launch_description():
     pkg_urdf_launch = FindPackageShare('urdf_launch')
     
     # URDF and RViz config paths
-    urdf_path = PathJoinSubstitution([pkg_pipette_description, 'urdf', 'pipette.urdf.xacro'])
+    PathJoinSubstitution([pkg_pipette_description, 'urdf', 'pipette.urdf.xacro'])
     rviz_config_path = PathJoinSubstitution([pkg_pipette_description, 'rviz', 'pipette_demo.rviz'])
 
     # Launch URDF display (robot_state_publisher + joint_state_publisher + rviz)

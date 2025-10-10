@@ -6,12 +6,11 @@ from rclpy.action import ActionServer, GoalResponse, CancelResponse
 from rclpy.executors import MultiThreadedExecutor
 from control_msgs.action import FollowJointTrajectory
 from pipette_driver.action import PipettorOperation
-from std_msgs.msg import Header, ColorRGBA
+from std_msgs.msg import ColorRGBA
 from std_srvs.srv import SetBool
 import serial
 import time
 import threading
-import re
 
 
 class PipetteDriverNode(Node):
@@ -316,7 +315,6 @@ class PipetteDriverNode(Node):
         Wait for Arduino DONE signal or timeout with cancellation checking.
         Returns False if canceled, True if completed.
         """
-        import rclpy
 
         # Convert target_time to seconds
         if hasattr(target_time, 'sec') and hasattr(target_time, 'nanosec'):
@@ -467,7 +465,6 @@ class PipetteDriverNode(Node):
     def pipettor_operation_callback(self, goal_handle):
         """Handle PipettorOperation action requests"""
         operation = goal_handle.request.operation.upper()
-        volume_pct = goal_handle.request.volume_pct
         led_color = goal_handle.request.led_color
 
         self.get_logger().info(f'Executing PipettorOperation: {operation}')
@@ -669,7 +666,7 @@ class PipetteDriverNode(Node):
         if success:
             self.get_logger().info(f'LED color set to R={r}, G={g}, B={b}')
         else:
-            self.get_logger().error(f'Failed to set LED color')
+            self.get_logger().error('Failed to set LED color')
 
         return success
 
