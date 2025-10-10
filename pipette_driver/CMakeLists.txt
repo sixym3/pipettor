@@ -18,6 +18,9 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   DEPENDENCIES std_msgs action_msgs builtin_interfaces
 )
 
+# Export dependencies for interface package
+ament_export_dependencies(rosidl_default_runtime)
+
 # Find Python dependencies
 find_package(ament_cmake_python REQUIRED)
 find_package(rclpy REQUIRED)
